@@ -366,8 +366,8 @@ def create_order():
         if quantity <= 0 or network not in {"TRC20", "BEP20"} or not txid or not primary:
             return error_response("Enter a valid amount, network, TXID, and primary UPI.", 400)
         rate = config_values(db)["usdt_rate"]
-        cursor = db.execute("INSERT INTO orders(user_id,usdt_amount,inr_total,network,txid,status,upi_id,rate,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (user["id"], quantity, round(quantity * rate, 2), network, txid, "VERIFYING_DEPOSIT", primary["upi_id"], rate, utc_now()))
-        return jsonify({"id": cursor.lastrowid, "email": user["email"], "upi_id": primary["upi_id"], "quantity": quantity, "total_usdt": quantity, "sold_usdt": 0.0, "remaining_usdt": quantity, "network": network, "txid": txid, "rate": rate, "total_inr": round(quantity * rate, 2), "paid_inr": 0.0, "payout_logs": [], "status": "VERIFYING_DEPOSIT"}), 201
+        cursor = db.execute("INSERT INTO orders(user_id,usdt_amount,inr_total,network,txid,status,upi_id,rate,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (user["id"], quantity, round(quantity * rate, 2), network, txid, "VERIFYING", primary["upi_id"], rate, utc_now()))
+        return jsonify({"id": cursor.lastrowid, "email": user["email"], "upi_id": primary["upi_id"], "quantity": quantity, "total_usdt": quantity, "sold_usdt": 0.0, "remaining_usdt": quantity, "network": network, "txid": txid, "rate": rate, "total_inr": round(quantity * rate, 2), "paid_inr": 0.0, "payout_logs": [], "status": "VERIFYING"}), 201
 
 
 def order_dict(db, row):
@@ -384,6 +384,30 @@ def get_orders():
         user = user_from_session(db)
         rows = db.execute("SELECT o.*, u.email FROM orders o JOIN users u ON u.id=o.user_id WHERE o.user_id=? ORDER BY o.id DESC", (user["id"],)).fetchall()
         return jsonify([order_dict(db, row) for row in rows])
+
+
+@app.get("/api/user/orders")
+@user_required
+def get_user_orders():
+    return get_orders()
+
+
+@app.get("/api/user/orders/active")
+@user_required
+def get_active_user_orders():
+    with db_connect() as db:
+        user = user_from_session(db)
+        rows = db.execute("SELECT o.*, u.email FROM orders o JOIN users u ON u.id=o.user_id WHERE o.user_id=? AND o.status NOT IN ('COMPLETED') ORDER BY o.created_at DESC", (user["id"],)).fetchall()
+        return jsonify([order_dict(db, row) for row in rows])
+
+
+@app.get("/api/user/active-order")
+@user_required
+def get_active_user_order():
+    with db_connect() as db:
+        user = user_from_session(db)
+        row = db.execute("SELECT o.*, u.email FROM orders o JOIN users u ON u.id=o.user_id WHERE o.user_id=? AND o.status NOT IN ('COMPLETED') ORDER BY o.created_at DESC LIMIT 1", (user["id"],)).fetchone()
+        return jsonify(order_dict(db, row) if row else None)
 
 
 @app.get("/api/user/ledger")
