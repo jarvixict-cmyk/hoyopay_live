@@ -1,4 +1,5 @@
 import os
+import re
 import secrets
 import sqlite3
 from datetime import datetime, timezone
@@ -41,6 +42,37 @@ def clean_text(value):
 
 def clean_email(value):
     return clean_text(value).lower()
+
+
+def normalize_upi_vpa(value, wallet_name=None):
+    raw = clean_text(value)
+    if not raw:
+        return "", "UPI ID is required."
+
+    if wallet_name and wallet_name != "Custom UPI ID":
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) != 10:
+            return "", "Enter a valid 10-digit mobile number."
+        wallet_domains = {
+            "FreeCharge": "freecharge",
+            "PhonePe": "ybl",
+            "MobiKwik": "mobikwik",
+        }
+        domain = wallet_domains.get(wallet_name, "ybl")
+        return f"{digits}@{domain}", ""
+
+    if "@" not in raw:
+        return "", "Use a valid UPI VPA like name@bank or mobile@wallet."
+
+    local, domain = raw.split("@", 1)
+    local = re.sub(r"[^a-zA-Z0-9._-]", "", local)
+    domain = re.sub(r"[^a-zA-Z0-9.-]", "", domain)
+    vpa = f"{local}@{domain}".lower()
+    if not re.fullmatch(r"^[a-z0-9._-]+@[a-z0-9.-]+$", vpa):
+        return "", "UPI ID format is invalid. Use a valid VPA format."
+    if len(local) < 3 or len(domain) < 2:
+        return "", "UPI ID format is invalid. Use a valid VPA format."
+    return vpa, ""
 
 
 def db_connect():
@@ -208,7 +240,18 @@ def database_error(error):
 def index():
     with db_connect() as db:
         user = user_from_session(db)
-        return render_template("user.html", show_auth=user is None, user=public_user(db, user) if user else None, config=config_values(db))
+        if not user:
+            return render_template("user.html", show_auth=True, user=None, config=config_values(db))
+        return render_template("user.html", show_auth=False, user=public_user(db, user), config=config_values(db))
+
+
+@app.get("/user")
+def user_page():
+    with db_connect() as db:
+        user = user_from_session(db)
+        if not user:
+            return render_template("user.html", show_auth=True, user=None, config=config_values(db))
+        return render_template("user.html", show_auth=False, user=public_user(db, user), config=config_values(db))
 
 
 @app.get("/login")
@@ -326,13 +369,34 @@ def get_profile():
 @app.post("/api/user/upi")
 @user_required
 def add_upi():
-    upi_id = clean_text((request.get_json(silent=True) or {}).get("upi_id"))
-    if not upi_id or "@" not in upi_id:
-        return error_response("Enter a valid UPI VPA.", 400)
+    payload = request.get_json(silent=True) or {}
+    wallet_name = clean_text(payload.get("wallet"))
+    mobile = clean_text(payload.get("mobile"))
+    upi_id = clean_text(payload.get("upi_id"))
+    if wallet_name and wallet_name != "Custom UPI ID":
+        resolved_upi, error = normalize_upi_vpa(mobile, wallet_name)
+        if error:
+            return error_response(error, 400)
+        label = wallet_name
+    else:
+        resolved_upi, error = normalize_upi_vpa(upi_id)
+        if error:
+            return error_response(error, 400)
+        label = "Custom UPI ID"
     with db_connect() as db:
         user = user_from_session(db)
-        db.execute("INSERT OR IGNORE INTO user_upis(user_id,upi_id,is_primary,created_at) VALUES(?,?,0,?)", (user["id"], upi_id, utc_now()))
-        return jsonify({"message": "UPI account linked.", **public_user(db, user)})
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT OR IGNORE INTO user_upis(user_id,upi_id,is_primary,created_at) VALUES(?,?,0,?)", (user["id"], resolved_upi, utc_now()))
+        db.execute("UPDATE user_upis SET is_primary = CASE WHEN upi_id = ? THEN 1 ELSE 0 END WHERE user_id = ?", (resolved_upi, user["id"]))
+        db.commit()
+        payload_user = public_user(db, user)
+        payload_user["upi_id"] = resolved_upi
+        return jsonify({
+            "message": "UPI account linked.",
+            "badge": f"✅ {label} Wallet Linked (Active)",
+            "user": payload_user,
+            **payload_user,
+        })
 
 
 @app.post("/api/user/upi/primary")
@@ -347,7 +411,7 @@ def set_primary_upi():
         db.execute("UPDATE user_upis SET is_primary = 0 WHERE user_id = ?", (user["id"],))
         db.execute("UPDATE user_upis SET is_primary = 1 WHERE user_id = ? AND upi_id = ?", (user["id"], upi_id))
         db.commit()
-        return jsonify({"message": "Primary UPI updated.", **public_user(db, user)})
+        return jsonify({"message": "Primary UPI updated.", "badge": "✅ Primary Wallet Updated", **public_user(db, user)})
 
 
 @app.post("/api/orders/create")
